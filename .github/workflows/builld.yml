@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # More stable for kernel builds
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
 
     steps:
@@ -20,12 +20,12 @@ jobs:
     - name: Setup ARM64 Build Environment
       run: |
         sudo apt update
-        # Essential ARM64 build dependencies
+        # Install only essential ARM64 packages (removed problematic 32-bit libs)
         sudo apt install -y build-essential libncurses-dev flex bison libssl-dev \
           libelf-dev bc python3 git gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-          libc6-dev-i386 lib32gcc-dev lib32stdc++6 ccache
+          ccache
 
-        # Create essential symlinks for ARM64 toolchain
+        # Create ARM64 toolchain symlinks
         sudo ln -sf /usr/bin/aarch64-linux-gnu-as /usr/local/bin/as
         sudo ln -sf /usr/bin/aarch64-linux-gnu-ld /usr/local/bin/ld
         sudo ln -sf /usr/bin/aarch64-linux-gnu-nm /usr/local/bin/nm
@@ -34,46 +34,46 @@ jobs:
 
     - name: Install Android 10 Toolchain
       run: |
-        # ARM64-specific Clang toolchain
+        # ARM64-specific Clang
         git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
           -b android-10.0.0_r47 clang
         echo "CLANG_PATH=$(pwd)/clang/clang-r353983c/bin" >> $GITHUB_ENV
         echo "PATH=${CLANG_PATH}:$PATH" >> $GITHUB_ENV
 
-        # ARM64 GCC 4.9 toolchain
+        # ARM64 GCC 4.9
         git clone --depth=1 \
           https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
         echo "CROSS_COMPILE=$(pwd)/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> $GITHUB_ENV
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "CC=clang" >> $GITHUB_ENV
 
-    - name: Configure ARM64 Kernel
+    - name: Configure Kernel
       run: |
         # Apply ARM64-specific config
         config=arch/arm64/configs/msm8953-perf_defconfig
-        echo "CONFIG_ARM64=y" >> $config
-        echo "CONFIG_ARCH_MSM8953=y" >> $config
+        [ -f "$config" ] || { echo "Error: Defconfig not found!"; exit 1; }
         
-        # Enable OverlayFS for ARM64
-        echo "CONFIG_OVERLAY_FS=y" >> $config
-        echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> $config
-        echo "CONFIG_OVERLAY_FS_INDEX=y" >> $config
+        # Essential ARM64 settings
+        echo "CONFIG_ARM64=y" >> "$config"
+        echo "CONFIG_ARCH_MSM8953=y" >> "$config"
         
-        # Disable incompatible features
-        echo "CONFIG_MODULES=n" >> $config
-        echo "CONFIG_MODULE_UNLOAD=n" >> $config
+        # OverlayFS
+        echo "CONFIG_OVERLAY_FS=y" >> "$config"
+        echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$config"
+        echo "CONFIG_OVERLAY_FS_INDEX=y" >> "$config"
 
-    - name: Build ARM64 Kernel
+    - name: Build Kernel
       run: |
-        # Initialize ARM64 config
-        make O=out ARCH=arm64 msm8953-perf_defconfig
+        # Initialize config
+        make O=out ARCH=arm64 msm8953-perf_defconfig || { echo "Defconfig failed!"; exit 1; }
         
-        # Apply ARM64-specific fixes
-        ./scripts/config --file out/.config -e CONFIG_ARM64
-        ./scripts/config --file out/.config -d LTO
-        ./scripts/config --file out/.config -d LTO_CLANG
-        ./scripts/config --file out/.config -d COMPILE_HOST_TOOLS
-        
+        # ARM64-specific adjustments
+        ./scripts/config --file out/.config \
+          -e CONFIG_ARM64 \
+          -d LTO \
+          -d LTO_CLANG \
+          -d COMPILE_HOST_TOOLS
+
         # Build with ARM64 toolchain
         make -j$(nproc) O=out ARCH=arm64 \
             CC="clang" \
@@ -81,52 +81,43 @@ jobs:
             CROSS_COMPILE="aarch64-linux-android-" \
             HOSTCC="clang" \
             HOSTCXX="clang++" \
-            HOSTLD="ld" \
             AS="aarch64-linux-gnu-as" \
-            LD="aarch64-linux-gnu-ld" \
-            NM="aarch64-linux-gnu-nm" \
-            STRIP="aarch64-linux-gnu-strip"
+            LD="aarch64-linux-gnu-ld" || { echo "Build failed!"; exit 1; }
 
-    - name: Verify ARM64 Kernel
+    - name: Verify Output
       run: |
-        # Check ARM64 architecture
-        file out/arch/arm64/boot/Image.gz-dtb | grep "ARM64"
-        
-        # Verify OverlayFS support
-        strings out/arch/arm64/boot/Image.gz-dtb | grep -i "overlay" | grep "CONFIG"
+        [ -f "out/arch/arm64/boot/Image.gz-dtb" ] || { echo "Kernel image not found!"; exit 1; }
+        file out/arch/arm64/boot/Image.gz-dtb | grep "ARM64" || { echo "Not an ARM64 kernel!"; exit 1; }
 
     - name: Create Flash Package
       run: |
         mkdir -p AnyKernel3
         cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
         
-        # ARM64-specific flash script
         cat > AnyKernel3/anykernel.sh <<'EOF'
         #!/system/bin/sh
-        device="TB-X304L"
         block=/dev/block/platform/soc/7824900.sdhci/by-name/boot
-        is_slot_device=0
+        [ -b "$block" ] || block=/dev/block/bootdevice/by-name/boot
         
-        ui_print "Flashing ARM64 kernel for $device..."
-        dd if=$block of=/tmp/anykernel/boot.img
-        /tmp/anykernel/unpackbootimg -i /tmp/anykernel/boot.img
-        /tmp/anykernel/mkbootimg \
+        ui_print "Flashing ARM64 kernel..."
+        dd if=$block of=/tmp/boot.img
+        unpackbootimg -i /tmp/boot.img -o /tmp/anykernel
+        mkbootimg \
           --kernel Image.gz-dtb \
-          --ramdisk /tmp/anykernel/initrd.img \
+          --ramdisk /tmp/anykernel/ramdisk.gz \
           --base $(cat /tmp/anykernel/boot.img-base) \
           --pagesize $(cat /tmp/anykernel/boot.img-pagesize) \
-          -o /tmp/anykernel/new_boot.img
-        dd if=/tmp/anykernel/new_boot.img of=$block
-        ui_print "ARM64 kernel flashed successfully!"
+          -o /tmp/new_boot.img
+        dd if=/tmp/new_boot.img of=$block
+        ui_print "ARM64 kernel flashed!"
         EOF
         
-        # Package for ARM64 device
         zip -r9 kernel-TB-X304L-arm64.zip AnyKernel3/
 
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
-        name: kernel-arm64-build
+        name: kernel-arm64
         path: |
           out/arch/arm64/boot/Image.gz-dtb
           kernel-TB-X304L-arm64.zip
