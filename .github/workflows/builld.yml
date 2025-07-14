@@ -50,11 +50,15 @@ jobs:
           -d LTO_CLANG \
           -d COMPILE_HOST_TOOLS
         
-        # Disable problematic modules if needed
+        # Disable problematic USB storage drivers
         ./scripts/config --file out/.config \
-          -d CONFIG_DRM_MSM \
-          -d CONFIG_FB_MSM \
-          -d CONFIG_DEBUG_FS
+          -d CONFIG_USB_STORAGE \
+          -d CONFIG_USB_UAS
+        
+        # Enable alternative USB drivers
+        ./scripts/config --file out/.config \
+          -e CONFIG_USB_MASS_STORAGE \
+          -e CONFIG_USB_GADGET
 
     - name: Build Kernel
       run: |
@@ -67,7 +71,8 @@ jobs:
           OBJDUMP=${CROSS_COMPILE}objdump \
           STRIP=${CROSS_COMPILE}strip \
           HOSTCC=gcc \
-          HOSTCXX=g++
+          HOSTCXX=g++ \
+          KCFLAGS="-Wno-error=deprecated-declarations -Wno-error=date-time"
 
     - name: Verify Output
       run: |
@@ -95,17 +100,10 @@ jobs:
         
         dump_boot() {
           dd if=$block of=/tmp/anykernel/boot.img
-          unpackbootimg -i /tmp/anykernel/boot.img -o /tmp/anykernel
         }
         
         write_boot() {
-          mkbootimg --kernel Image.gz-dtb \
-            --ramdisk /tmp/anykernel/ramdisk.gz \
-            --cmdline "$(cat /tmp/anykernel/boot.img-cmdline)" \
-            --base $(cat /tmp/anykernel/boot.img-base) \
-            --pagesize $(cat /tmp/anykernel/boot.img-pagesize) \
-            -o /tmp/anykernel/new_boot.img
-          dd if=/tmp/anykernel/new_boot.img of=$block
+          dd if=/tmp/anykernel/Image.gz-dtb of=$block
         }
         
         set -e
@@ -114,18 +112,10 @@ jobs:
         ui_print "Kernel flashed successfully!"
         EOF
         
-        # Add tools if available
-        if [ -f "scripts/unpackbootimg" ]; then
-          cp scripts/unpackbootimg AnyKernel3/
-        fi
-        if [ -f "scripts/mkbootimg" ]; then
-          cp scripts/mkbootimg AnyKernel3/
-        fi
-        
         zip -r9 kernel-TB-X304L.zip AnyKernel3/
 
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: kernel-build
         path: |
