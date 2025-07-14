@@ -22,19 +22,19 @@ jobs:
         sudo apt update
         sudo apt install -y build-essential libncurses-dev flex bison libssl-dev \
           libelf-dev bc python3 git gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-          ccache lz4 dtc kmod
+          ccache lz4 device-tree-compiler kmod
 
     - name: Install Correct Toolchain
       run: |
-        # Use prebuilt AOSP GCC 4.9 (confirmed working with MSM8953)
-        wget https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android10-release.tar.gz
+        # Download verified AOSP GCC 4.9 toolchain
+        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz
         mkdir -p toolchain
-        tar -xzf android10-release.tar.gz -C toolchain
+        tar -xzf android-10.0.0_r47.tar.gz -C toolchain
         echo "CROSS_COMPILE=$(pwd)/toolchain/bin/aarch64-linux-android-" >> $GITHUB_ENV
         echo "ARCH=arm64" >> $GITHUB_ENV
         
-        # Verify toolchain binaries exist
-        ls -l toolchain/bin/aarch64-linux-android-*
+        # Verify critical tools exist
+        ls -la toolchain/bin/aarch64-linux-android-{gcc,ld,nm,objcopy}
 
     - name: Configure Kernel
       run: |
@@ -48,23 +48,18 @@ jobs:
           -e CONFIG_OVERLAY_FS_INDEX \
           -d LTO \
           -d LTO_CLANG \
-          -d COMPILE_HOST_TOOLS
-        
-        # Fix VDSO issues
-        ./scripts/config --file out/.config \
+          -d COMPILE_HOST_TOOLS \
           -e CONFIG_ARM64_VDSO \
-          -e CONFIG_GENERIC_TIME_VSYSCALL \
-          -e CONFIG_COMPAT_VDSO
+          -e CONFIG_GENERIC_TIME_VSYSCALL
 
     - name: Build Kernel
       run: |
-        # Build with proper toolchain paths
-        make -j$(nproc) O=out ARCH=arm64 \
+        # Build with explicit tool paths
+        make -j$(($(nproc)+1)) O=out ARCH=arm64 \
           CROSS_COMPILE=${CROSS_COMPILE} \
           LD=${CROSS_COMPILE}ld \
           NM=${CROSS_COMPILE}nm \
           OBJCOPY=${CROSS_COMPILE}objcopy \
-          OBJDUMP=${CROSS_COMPILE}objdump \
           STRIP=${CROSS_COMPILE}strip
 
     - name: Verify Output
@@ -75,6 +70,7 @@ jobs:
         fi
         echo "Build successful!"
         file out/arch/arm64/boot/Image.gz-dtb
+        strings out/arch/arm64/boot/Image.gz-dtb | grep -i "overlay"
 
     - name: Create Flashable ZIP
       run: |
@@ -110,6 +106,12 @@ jobs:
         write_boot
         ui_print "Kernel flashed successfully!"
         EOF
+        
+        # Add tools if needed
+        if [ -f "scripts/unpackbootimg" ]; then
+          cp scripts/unpackbootimg AnyKernel3/
+          cp scripts/mkbootimg AnyKernel3/
+        fi
         
         zip -r9 kernel-TB-X304L.zip AnyKernel3/
 
