@@ -1,4 +1,4 @@
-name: Build Kernel for Lenovo TB-X304L (ARM64)
+name: Build Kernel for Lenovo TB-X304L (MSM8953)
 
 on:
   push:
@@ -17,107 +17,96 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
-    - name: Setup ARM64 Build Environment
+    - name: Setup Build Environment
       run: |
         sudo apt update
-        # Install only essential ARM64 packages (removed problematic 32-bit libs)
         sudo apt install -y build-essential libncurses-dev flex bison libssl-dev \
           libelf-dev bc python3 git gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
           ccache
 
-        # Create ARM64 toolchain symlinks
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-as /usr/local/bin/as
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-ld /usr/local/bin/ld
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-nm /usr/local/bin/nm
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-objcopy /usr/local/bin/objcopy
-        sudo ln -sf /usr/bin/aarch64-linux-gnu-strip /usr/local/bin/strip
-
-    - name: Install Android 10 Toolchain
+    - name: Install AOSP Toolchain
       run: |
-        # ARM64-specific Clang
-        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-          -b android-10.0.0_r47 clang
-        echo "CLANG_PATH=$(pwd)/clang/clang-r353983c/bin" >> $GITHUB_ENV
-        echo "PATH=${CLANG_PATH}:$PATH" >> $GITHUB_ENV
-
-        # ARM64 GCC 4.9
-        git clone --depth=1 \
-          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
         echo "CROSS_COMPILE=$(pwd)/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> $GITHUB_ENV
         echo "ARCH=arm64" >> $GITHUB_ENV
-        echo "CC=clang" >> $GITHUB_ENV
 
     - name: Configure Kernel
       run: |
-        # Apply ARM64-specific config
-        config=arch/arm64/configs/msm8953-perf_defconfig
-        [ -f "$config" ] || { echo "Error: Defconfig not found!"; exit 1; }
-        
-        # Essential ARM64 settings
-        echo "CONFIG_ARM64=y" >> "$config"
-        echo "CONFIG_ARCH_MSM8953=y" >> "$config"
-        
-        # OverlayFS
-        echo "CONFIG_OVERLAY_FS=y" >> "$config"
-        echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$config"
-        echo "CONFIG_OVERLAY_FS_INDEX=y" >> "$config"
+        # Verify defconfig exists
+        DEFCONFIG="lineageos_tb8704_defconfig"
+        if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
+          echo "::error::Defconfig ${DEFCONFIG} not found!"
+          echo "Available defconfigs:"
+          ls arch/arm64/configs/
+          exit 1
+        fi
+
+        # Generate initial config
+        make O=out ARCH=arm64 ${DEFCONFIG}
+
+        # Enable OverlayFS
+        ./scripts/config --file out/.config \
+          -e CONFIG_OVERLAY_FS \
+          -e CONFIG_OVERLAY_FS_REDIRECT_DIR \
+          -e CONFIG_OVERLAY_FS_INDEX
 
     - name: Build Kernel
       run: |
-        # Initialize config
-        make O=out ARCH=arm64 msm8953-perf_defconfig || { echo "Defconfig failed!"; exit 1; }
-        
-        # ARM64-specific adjustments
-        ./scripts/config --file out/.config \
-          -e CONFIG_ARM64 \
-          -d LTO \
-          -d LTO_CLANG \
-          -d COMPILE_HOST_TOOLS
-
-        # Build with ARM64 toolchain
         make -j$(nproc) O=out ARCH=arm64 \
-            CC="clang" \
-            CLANG_TRIPLE="aarch64-linux-gnu-" \
-            CROSS_COMPILE="aarch64-linux-android-" \
-            HOSTCC="clang" \
-            HOSTCXX="clang++" \
-            AS="aarch64-linux-gnu-as" \
-            LD="aarch64-linux-gnu-ld" || { echo "Build failed!"; exit 1; }
+          CROSS_COMPILE=${CROSS_COMPILE} \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu-
 
     - name: Verify Output
       run: |
-        [ -f "out/arch/arm64/boot/Image.gz-dtb" ] || { echo "Kernel image not found!"; exit 1; }
-        file out/arch/arm64/boot/Image.gz-dtb | grep "ARM64" || { echo "Not an ARM64 kernel!"; exit 1; }
+        if [ ! -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+          echo "::error::Kernel image not found!"
+          exit 1
+        fi
+        echo "Build successful!"
+        file out/arch/arm64/boot/Image.gz-dtb
 
-    - name: Create Flash Package
+    - name: Create Flashable ZIP
       run: |
         mkdir -p AnyKernel3
         cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
         
         cat > AnyKernel3/anykernel.sh <<'EOF'
-        #!/system/bin/sh
-        block=/dev/block/platform/soc/7824900.sdhci/by-name/boot
-        [ -b "$block" ] || block=/dev/block/bootdevice/by-name/boot
+        #!/bin/bash
+        device.name1=TB-X304L
+        block=/dev/block/bootdevice/by-name/boot
+        is_slot_device=0
         
-        ui_print "Flashing ARM64 kernel..."
-        dd if=$block of=/tmp/boot.img
-        unpackbootimg -i /tmp/boot.img -o /tmp/anykernel
-        mkbootimg \
-          --kernel Image.gz-dtb \
-          --ramdisk /tmp/anykernel/ramdisk.gz \
-          --base $(cat /tmp/anykernel/boot.img-base) \
-          --pagesize $(cat /tmp/anykernel/boot.img-pagesize) \
-          -o /tmp/new_boot.img
-        dd if=/tmp/new_boot.img of=$block
-        ui_print "ARM64 kernel flashed!"
+        ui_print() { echo -e "ui_print $1\nui_print" > /proc/self/fd/$1; }
+        ui_print "Flashing TB-X304L kernel..."
+        
+        dump_boot() {
+          dd if=$block of=/tmp/anykernel/boot.img
+          unpackbootimg -i /tmp/anykernel/boot.img -o /tmp/anykernel
+        }
+        
+        write_boot() {
+          mkbootimg --kernel Image.gz-dtb \
+            --ramdisk /tmp/anykernel/ramdisk.gz \
+            --cmdline "$(cat /tmp/anykernel/boot.img-cmdline)" \
+            --base $(cat /tmp/anykernel/boot.img-base) \
+            --pagesize $(cat /tmp/anykernel/boot.img-pagesize) \
+            -o /tmp/anykernel/new_boot.img
+          dd if=/tmp/anykernel/new_boot.img of=$block
+        }
+        
+        set -e
+        dump_boot
+        write_boot
+        ui_print "Kernel flashed successfully!"
         EOF
         
-        zip -r9 kernel-TB-X304L-arm64.zip AnyKernel3/
+        zip -r9 kernel-TB-X304L.zip AnyKernel3/
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-arm64
+        name: kernel-build
         path: |
           out/arch/arm64/boot/Image.gz-dtb
-          kernel-TB-X304L-arm64.zip
+          kernel-TB-X304L.zip
