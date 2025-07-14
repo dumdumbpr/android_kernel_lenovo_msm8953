@@ -22,40 +22,50 @@ jobs:
         sudo apt update
         sudo apt install -y build-essential libncurses-dev flex bison libssl-dev \
           libelf-dev bc python3 git gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-          ccache
+          ccache lz4 dtc kmod
 
-    - name: Install AOSP Toolchain
+    - name: Install Correct Toolchain
       run: |
-        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
-        echo "CROSS_COMPILE=$(pwd)/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> $GITHUB_ENV
+        # Use prebuilt AOSP GCC 4.9 (confirmed working with MSM8953)
+        wget https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android10-release.tar.gz
+        mkdir -p toolchain
+        tar -xzf android10-release.tar.gz -C toolchain
+        echo "CROSS_COMPILE=$(pwd)/toolchain/bin/aarch64-linux-android-" >> $GITHUB_ENV
         echo "ARCH=arm64" >> $GITHUB_ENV
+        
+        # Verify toolchain binaries exist
+        ls -l toolchain/bin/aarch64-linux-android-*
 
     - name: Configure Kernel
       run: |
-        # Verify defconfig exists
-        DEFCONFIG="lineageos_tb8704_defconfig"
-        if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
-          echo "::error::Defconfig ${DEFCONFIG} not found!"
-          echo "Available defconfigs:"
-          ls arch/arm64/configs/
-          exit 1
-        fi
-
-        # Generate initial config
-        make O=out ARCH=arm64 ${DEFCONFIG}
-
-        # Enable OverlayFS
+        # Use lineageos_tb8704_defconfig
+        make O=out ARCH=arm64 lineageos_tb8704_defconfig
+        
+        # Apply essential config changes
         ./scripts/config --file out/.config \
           -e CONFIG_OVERLAY_FS \
           -e CONFIG_OVERLAY_FS_REDIRECT_DIR \
-          -e CONFIG_OVERLAY_FS_INDEX
+          -e CONFIG_OVERLAY_FS_INDEX \
+          -d LTO \
+          -d LTO_CLANG \
+          -d COMPILE_HOST_TOOLS
+        
+        # Fix VDSO issues
+        ./scripts/config --file out/.config \
+          -e CONFIG_ARM64_VDSO \
+          -e CONFIG_GENERIC_TIME_VSYSCALL \
+          -e CONFIG_COMPAT_VDSO
 
     - name: Build Kernel
       run: |
+        # Build with proper toolchain paths
         make -j$(nproc) O=out ARCH=arm64 \
           CROSS_COMPILE=${CROSS_COMPILE} \
-          CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu-
+          LD=${CROSS_COMPILE}ld \
+          NM=${CROSS_COMPILE}nm \
+          OBJCOPY=${CROSS_COMPILE}objcopy \
+          OBJDUMP=${CROSS_COMPILE}objdump \
+          STRIP=${CROSS_COMPILE}strip
 
     - name: Verify Output
       run: |
