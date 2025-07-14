@@ -1,0 +1,72 @@
+name: Build Kernel for TB-X304L (MSM8953)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout Kernel Source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set Up Environment
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential libncurses-dev flex bison libssl-dev libelf-dev bc python3 git
+
+    - name: Install AOSP Clang (Android 10 compatible)
+      run: |
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android10-release clang
+        echo "CLANG_PATH=$(pwd)/clang/clang-r353983c/bin" >> $GITHUB_ENV
+        echo "PATH=${CLANG_PATH}:$PATH" >> $GITHUB_ENV
+
+    - name: Set Up Toolchain
+      run: |
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+        echo "CROSS_COMPILE=$(pwd)/aarch64-linux-android-4.9/bin/aarch64-linux-android-" >> $GITHUB_ENV
+        echo "ARCH=arm64" >> $GITHUB_ENV
+
+    - name: Enable OverlayFS in Config
+      run: |
+        echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/msm8953-perf_defconfig
+        echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> arch/arm64/configs/msm8953-perf_defconfig
+        echo "CONFIG_OVERLAY_FS_INDEX=y" >> arch/arm64/configs/msm8953-perf_defconfig
+
+    - name: Build Kernel
+      run: |
+        make O=out ARCH=$ARCH msm8953-perf_defconfig
+        make -j$(nproc) O=out ARCH=$ARCH \
+            CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=$CROSS_COMPILE
+
+    - name: Generate Flashable ZIP
+      run: |
+        mkdir -p AnyKernel3
+        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+        cat > AnyKernel3/anykernel.sh <<EOF
+        #!/bin/bash
+        kernel_string="Lenovo TB-X304L Kernel with OverlayFS"
+        do.devicecheck=1
+        do.modules=0
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=TB-X304L
+        block=/dev/block/bootdevice/by-name/boot
+        is_slot_device=0
+        EOF
+        zip -r9 kernel-flashable.zip AnyKernel3/
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build
+        path: |
+          out/arch/arm64/boot/Image.gz-dtb
+          kernel-flashable.zip
