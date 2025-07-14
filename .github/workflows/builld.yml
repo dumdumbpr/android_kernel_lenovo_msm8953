@@ -24,9 +24,9 @@ jobs:
           libelf-dev bc python3 git gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
           ccache lz4 device-tree-compiler kmod
 
-    - name: Install Correct Toolchain
+    - name: Install GCC 4.9 Toolchain
       run: |
-        # Download verified AOSP GCC 4.9 toolchain
+        # Download verified GCC 4.9 for MSM8953
         wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz
         mkdir -p toolchain
         tar -xzf android-10.0.0_r47.tar.gz -C toolchain
@@ -48,9 +48,13 @@ jobs:
           -e CONFIG_OVERLAY_FS_INDEX \
           -d LTO \
           -d LTO_CLANG \
-          -d COMPILE_HOST_TOOLS \
-          -e CONFIG_ARM64_VDSO \
-          -e CONFIG_GENERIC_TIME_VSYSCALL
+          -d COMPILE_HOST_TOOLS
+        
+        # Disable problematic modules if needed
+        ./scripts/config --file out/.config \
+          -d CONFIG_DRM_MSM \
+          -d CONFIG_FB_MSM \
+          -d CONFIG_DEBUG_FS
 
     - name: Build Kernel
       run: |
@@ -60,7 +64,10 @@ jobs:
           LD=${CROSS_COMPILE}ld \
           NM=${CROSS_COMPILE}nm \
           OBJCOPY=${CROSS_COMPILE}objcopy \
-          STRIP=${CROSS_COMPILE}strip
+          OBJDUMP=${CROSS_COMPILE}objdump \
+          STRIP=${CROSS_COMPILE}strip \
+          HOSTCC=gcc \
+          HOSTCXX=g++
 
     - name: Verify Output
       run: |
@@ -107,16 +114,18 @@ jobs:
         ui_print "Kernel flashed successfully!"
         EOF
         
-        # Add tools if needed
+        # Add tools if available
         if [ -f "scripts/unpackbootimg" ]; then
           cp scripts/unpackbootimg AnyKernel3/
+        fi
+        if [ -f "scripts/mkbootimg" ]; then
           cp scripts/mkbootimg AnyKernel3/
         fi
         
         zip -r9 kernel-TB-X304L.zip AnyKernel3/
 
     - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: kernel-build
         path: |
